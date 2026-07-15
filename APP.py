@@ -7,15 +7,16 @@ import re
 import pandas as pd
 import pdf2image
 
-# 設定網頁標題
+# 設定網頁標題與版面
 st.set_page_config(page_title="Ethan's 發票辨識系統", page_icon="🧾", layout="wide")
 st.title("🧾 Ethan's 發票辨識系統")
 st.write("利用 Google Cloud Vision API 進行超精準 OCR 解析，並自動分類多張發票資訊！")
 
-# 1. 初始化 Google Vision 客戶端
+# 1. 初始化 Google Vision 客戶端 (從 Streamlit 後台 Secrets 安全讀取)
 @st.cache_resource
 def get_vision_client():
     try:
+        # 將 secrets 轉為 dict 格式傳給 Google 憑證庫
         info = dict(st.secrets["gcp_service_account"])
         credentials = service_account.Credentials.from_service_account_info(info)
         return vision.ImageAnnotatorClient(credentials=credentials)
@@ -25,7 +26,7 @@ def get_vision_client():
 
 client = get_vision_client()
 
-# 2. 進階多發票區段解析器
+# 2. 進階多發票區段解析器 (Regex 規則)
 def parse_all_invoices(text):
     # 尋找所有發票號碼的位置 (例如 BJ-05380109 或 AY-90253355)
     matches = list(re.finditer(r'([A-Z]{2})-?([0-9]{8})', text))
@@ -131,6 +132,7 @@ if uploaded_file is not None and client is not None:
                     # 解析該頁的所有發票
                     page_invoices = parse_all_invoices(full_text)
                     for inv in page_invoices:
+                        # 標註來源頁數
                         inv["檔案名稱"] = f"{uploaded_file.name} (第 {idx + 1} 頁)" if len(pages_to_process) > 1 else uploaded_file.name
                         all_results.append(inv)
                         
@@ -140,7 +142,7 @@ if uploaded_file is not None and client is not None:
         status_text.text("🎉 辨識與整理完成！")
         progress_bar.empty()
         
-        # 4. 顯示結果
+        # 4. 顯示與輸出結果
         if all_results:
             st.success(f"成功在您的檔案中偵測到 {len(all_results)} 張發票！")
             
@@ -148,12 +150,16 @@ if uploaded_file is not None and client is not None:
             df = pd.DataFrame(all_results)
             df = df[["檔案名稱", "發票字母", "發票號碼", "賣方統編", "總金額", "日期"]]
             
-            # 展示美美表格
+            # 將表格索引（Index）從 1 開始計算，不要從 0 開始
+            df.index = df.index + 1
+            
+            # 展示表格
             st.subheader("📊 發票欄位自動整理結果：")
             st.dataframe(df, use_container_width=True)
             
-            # 提供 CSV 下載
-            csv = df.to_csv(index=False).encode('utf-8-sig')
+            # 提供 CSV 下載 (設定 index=True 且將 index 命名為 "項次" 一併匯出)
+            df.index.name = "項次"
+            csv = df.to_csv(index=True).encode('utf-8-sig')
             st.download_button(
                 label="📥 下載為 Excel/CSV 檔案",
                 data=csv,
