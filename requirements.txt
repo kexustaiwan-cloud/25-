@@ -1,5 +1,4 @@
 streamlit
-easyocr
+google-cloud-vision
 pillow
-numpy
 pdf2image
