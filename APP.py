@@ -1,67 +1,78 @@
 import streamlit as st
+from google.cloud import vision
+from google.oauth2 import service_account
 from PIL import Image
-import easyocr
-import numpy as np
+import io
 import pdf2image
 
-# 設定網頁標題與圖示
-st.set_page_config(page_title="發票 OCR 辨識系統", page_icon="🧾")
+# 設定網頁標題
+st.set_page_config(page_title="Google OCR 發票辨識系統", page_icon="🧾")
+st.title("🧾 Google OCR 發票辨識網頁版")
+st.write("直接上傳發票，由網頁背景直接呼叫 Google 頂級 Vision API 進行高精準辨識！")
 
-st.title("🧾 發票/收據文字辨識系統")
-st.write("請上傳您的發票掃描檔、照片或 PDF 檔，系統將自動解析文字內容。")
-
-# 📌 加上快取機制：避免每次上傳圖片都要重新下載/載入 OCR 模型，這能大幅加快辨識速度！
+# 初始化 Google Vision 客户端 (從 Streamlit 後台 Secrets 安全讀取)
 @st.cache_resource
-def load_ocr_reader():
-    return easyocr.Reader(['ch_tra', 'en'], gpu=False)
+def get_vision_client():
+    try:
+        info = dict(st.secrets["gcp_service_account"])
+        credentials = service_account.Credentials.from_service_account_info(info)
+        return vision.ImageAnnotatorClient(credentials=credentials)
+    except Exception as e:
+        st.error(f"⚠️ Google 憑證載入失敗，請確認 Streamlit Secrets 設定。錯誤資訊：{e}")
+        return None
 
-# 建立上傳檔案的區塊
-uploaded_file = st.file_uploader("請選擇發票圖片或 PDF (支援 JPG, JPEG, PNG, PDF)", type=["jpg", "jpeg", "png", "pdf"])
+client = get_vision_client()
 
-if uploaded_file is not None:
-    image = None
+# 上傳檔案
+uploaded_file = st.file_uploader("請上傳發票/收據圖片或 PDF", type=["jpg", "jpeg", "png", "pdf"])
+
+if uploaded_file is not None and client is not None:
+    image_bytes = None
+    display_image = None
     
-    # 判斷是否為 PDF
+    # 處理 PDF
     if uploaded_file.name.lower().endswith('.pdf'):
-        with st.spinner("⏳ 正在將 PDF 轉為圖片..."):
+        with st.spinner("⏳ 正在轉換 PDF 第一頁..."):
             try:
-                pdf_bytes = uploaded_file.read()
-                images = pdf2image.convert_from_bytes(pdf_bytes)
+                pdf_data = uploaded_file.read()
+                images = pdf2image.convert_from_bytes(pdf_data)
                 if images:
-                    image = images[0]  # 取第一頁
-                else:
-                    st.error("無法讀取該 PDF 檔案。")
+                    display_image = images[0]
+                    img_byte_arr = io.BytesIO()
+                    display_image.save(img_byte_arr, format='JPEG')
+                    image_bytes = img_byte_arr.getvalue()
             except Exception as e:
-                st.error(f"PDF 轉換失敗，請確認 packages.txt 內有寫入 poppler-utils：{e}")
+                st.error(f"PDF 處理失敗: {e}")
     else:
-        image = Image.open(uploaded_file)
-    
-    # 開始辨識
-    if image is not None:
-        # 修正新版 Streamlit 的圖片寬度參數
-        st.image(image, caption='📷 待辨識的發票畫面', width='stretch')
+        # 處理一般圖片
+        image_bytes = uploaded_file.read()
+        display_image = Image.open(io.BytesIO(image_bytes))
+
+    # 執行辨識
+    if image_bytes is not None and display_image is not None:
+        # 在網頁畫面上展示圖片
+        st.image(display_image, caption="📷 上傳的發票畫面", use_container_width=True)
         
-        with st.spinner("⏳ 正在辨識發票內容（首次辨識需下載 AI 模型，請耐心等候 2~3 分鐘）..."):
+        with st.spinner("🔮 Google OCR 正在精準分析文字..."):
             try:
-                # 使用有快取的載入器
-                reader = load_ocr_reader()
+                # 呼叫 Google OCR API
+                vision_image = vision.Image(content=image_bytes)
+                response = client.text_detection(image=vision_image)
+                texts = response.text_annotations
                 
-                img_np = np.array(image)
-                results = reader.readtext(img_np)
-                
-                st.success("🎉 辨識完成！")
-                st.subheader("📋 擷取到的發票文字：")
-                
-                extracted_text = []
-                for line in results:
-                    text = line[1]
-                    confidence = line[2]
-                    if confidence > 0.2:
-                        extracted_text.append(text)
-                        st.write(f"- {text}")
-                        
-                full_text = "\n".join(extracted_text)
-                st.text_area("您可以複製下方文字：", value=full_text, height=200)
-                
+                if response.error.message:
+                    st.error(f"Google Vision API 錯誤: {response.error.message}")
+                elif not texts:
+                    st.warning("⚠️ 無法從圖片中辨識出任何文字，請確認發票是否清晰。")
+                else:
+                    st.success("🎉 Google OCR 辨識成功！")
+                    
+                    # 取出完整辨識結果
+                    full_text = texts[0].description
+                    
+                    st.subheader("📋 擷取文字結果：")
+                    # 直接在網頁上顯示，使用者可以自由複製、修改
+                    st.text_area("發票文字內容：", value=full_text, height=350)
+                    
             except Exception as e:
-                st.error(f"辨識過程中發生錯誤：{e}")
+                st.error(f"辨識過程中發生錯誤: {e}")
