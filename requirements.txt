@@ -9,3 +9,4 @@ requests>=2.31.0
 google-cloud-vision
 pillow
 pdf2image
+flask
