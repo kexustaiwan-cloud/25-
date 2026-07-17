@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: taiwan-stock-scanner
+    env: python
+    buildCommand: pip install -r requirements.txt
+    # 掃描邏輯已改成「背景排程執行緒」寫入共用快取（scan_cache.py），
+    # 網頁請求只負責讀快取顯示，所以仍然可以維持 1 個 worker，
+    # 但如果你的入口是 Streamlit（streamlit run app.py），
+    # 請把 startCommand 換成對應的 streamlit 指令，
+    # 且千萬不要開多個 worker/process，否則背景排程執行緒會被重複啟動好幾份。
+    startCommand: gunicorn app:app --workers 1 --threads 8 --worker-class gthread --timeout 300 --bind 0.0.0.0:$PORT
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: SCAN_TIMEOUT_SEC
+        value: "270"
+      - key: ADMIN_PASSWORD
+        value: "admin_bob0309"
+      # ↓ 背景排程掃描設定
+      - key: SCAN_INTERVAL_MIN
+        value: "15"          # 幾分鐘背景重新掃描一次
+      - key: ONLY_MARKET_HOURS
+        value: "1"            # 1=只在台股盤中時間掃描，省資源；0=全天候
+    # ⚠️ 注意：Render 免費方案的 Web Service 閒置 15 分鐘沒人連線會自動休眠，
+    # 背景排程執行緒也會跟著暫停。如果想要「隨時都有人看，資料也隨時在更新」，
+    # 需要搭配一個免費的外部喚醒服務（例如 UptimeRobot / cron-job.org）
+    # 每 10 分鐘 ping 一次網站網址，讓 Render 不會把它睡眠，
+    # 或是直接升級到 Render 的付費方案（Always On）。
