@@ -51,14 +51,6 @@ INTERVAL_MIN       = 15
 K_THRESHOLD        = 30
 FINMIND_TOKEN      = ''          # FinMind API Token（建議填入以取得更多財務資料）
 
-# ── ★ v5.0 K值週期選擇（週K / 日K / 60分K） ─────────────────────────────────
-#   影響「K值門檻」判斷所採用的K線週期；60分K死叉出場、通道偵測等仍固定用60分K
-K_PERIOD           = '60m'      # '60m' | 'day' | 'week'
-K_PERIOD_LABELS    = {'60m': '60分K', 'day': '日K', 'week': '週K'}
-
-# ── ★ v5.0 自訂均線站上篩選（1~600日，0/None=不啟用） ───────────────────────
-MA_ABOVE_N         = 0
-
 # ── ☯ 卦象參數 ───────────────────────────────────────────────────────────────
 CHANNEL_NO_ENTRY_PCT  = 80
 CHANNEL_WARN_PCT      = 65
@@ -1912,9 +1904,10 @@ def fetch_60m(tid, mtype, verbose=False):
     return pd.DataFrame(), None
 
 
-def _fetch_finmind_day(tid):
+def _fetch_finmind_day(tid, days_needed=200):
     if not FINMIND_TOKEN: return pd.DataFrame()
-    start = (datetime.now() - timedelta(days=200)).strftime('%Y-%m-%d')
+    lookback = max(200, days_needed + 60)
+    start = (datetime.now() - timedelta(days=lookback)).strftime('%Y-%m-%d')
     url   = (f'https://api.finmindtrade.com/api/v4/data'
              f'?dataset=TaiwanStockPrice&data_id={tid}'
              f'&start_date={start}&token={FINMIND_TOKEN}')
@@ -1939,7 +1932,19 @@ def _fetch_finmind_day(tid):
         return pd.DataFrame()
 
 
-def fetch_day(tid, mtype, period_days=200):
+def _days_to_yf_period(days: int) -> str:
+    """把所需天數轉成 yfinance 可接受的 period 字串（取最接近且足夠的天數）。"""
+    if days <= 200:  return '200d'
+    if days <= 250:  return '1y'
+    if days <= 500:  return '2y'
+    if days <= 700:  return '3y'
+    return '5y'
+
+
+def fetch_day(tid, mtype, days_needed=200):
+    """抓取日K資料。days_needed：需要的最少交易日數（例如自訂均線天數），
+    預設200天以維持原本行為，若需要更長天數（如自訂均線1-600日）會自動抓取更久的區間。"""
+    period_str = _days_to_yf_period(days_needed)
     base_ids = [tid] + ([tid.zfill(4)] if len(tid) < 4 else [])
     order    = ['.TWO', '.TW'] if mtype == 'TWO' else ['.TW', '.TWO']
     seen, suf = set(), []
@@ -1947,7 +1952,6 @@ def fetch_day(tid, mtype, period_days=200):
         for s in order:
             sym = b + s
             if sym not in seen: seen.add(sym); suf.append(sym)
-    period_str = f'{max(int(period_days), 30)}d'
     for sym in suf:
         try:
             df = yf.Ticker(sym).history(period=period_str, interval='1d',
@@ -1961,23 +1965,40 @@ def fetch_day(tid, mtype, period_days=200):
         except Exception:
             continue
     for fm in ([tid] + ([tid.zfill(4)] if len(tid) < 4 else [])):
-        d = _fetch_finmind_day(fm)
+        d = _fetch_finmind_day(fm, days_needed=days_needed)
         if not d.empty and len(d) >= 30: return d
     return pd.DataFrame()
 
 
-def resample_to_weekly(df_day):
-    """把日K資料轉成週K（週五收盤為每週結算日），供「週K值」判斷使用"""
+def _resample_weekly(df_day):
+    """將日K資料轉換為週K（以週五為週期結束）。"""
     if df_day is None or df_day.empty:
         return pd.DataFrame()
+    agg = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
     try:
-        wk = df_day.resample('W-FRI').agg({
-            'Open': 'first', 'High': 'max', 'Low': 'min',
-            'Close': 'last', 'Volume': 'sum',
-        }).dropna(subset=['Open', 'High', 'Low', 'Close'])
-        return wk
+        dfw = df_day.resample('W-FRI').agg(agg)
+        dfw = dfw.dropna(subset=['Open', 'High', 'Low', 'Close'])
+        return dfw
     except Exception:
         return pd.DataFrame()
+
+
+def calc_k_by_interval(df_day, df_60m, k_interval='60m'):
+    """依使用者選擇的K值週期（'60m'/'day'/'week'）計算最新K值。
+    回傳 (k_val, k_label)；若資料不足回傳 (None, label)。"""
+    if k_interval == 'day':
+        label = '日K'
+        k_s, _ = calc_kd(df_day)
+    elif k_interval == 'week':
+        label = '週K'
+        df_w = _resample_weekly(df_day)
+        k_s, _ = calc_kd(df_w)
+    else:
+        label = '60分K'
+        k_s, _ = calc_kd(df_60m)
+    if k_s is None or len(k_s) == 0 or pd.isna(k_s.iloc[-1]):
+        return None, label
+    return float(k_s.iloc[-1]), label
 
 
 # =============================================================================
@@ -1998,26 +2019,26 @@ def _guess_mtype(t):
 def analyze_stock(tid, name, mtype,
                   entry_price=None, active_params=None,
                   mom_pct=None, fin_quality=None,
-                  k_period=None, ma_above_n=None):
+                  k_interval='60m', ma_custom_n=None):
+    """
+    k_interval  : K值判斷週期，'60m'(60分K，預設) / 'day'(日K) / 'week'(週K)
+    ma_custom_n : 自訂均線天數（1-600），若提供則額外計算「股價是否高於此均線」
+    """
     if active_params is None:
         active_params = get_active_params()
     k_thr     = active_params['k_threshold']
     mom_grade = classify_mom(mom_pct)
 
-    # ── ★ v5.0 K值週期 / 自訂均線篩選參數（未傳入時採用全域設定） ────────────
-    k_period   = k_period if k_period in ('60m', 'day', 'week') else K_PERIOD
-    ma_above_n = int(ma_above_n) if ma_above_n else (int(MA_ABOVE_N) if MA_ABOVE_N else 0)
-
     result = {
         "tid": tid, "name": name, "mtype": mtype,
         "price": None,
-        "k60": None, "k_day": None, "k_week": None, "k_label": None,
-        "k_period": K_PERIOD_LABELS.get(k_period, '60分K'),
-        "k_entry": None,
+        "k60": None, "k_label": None,
+        "k_selected": None, "k_selected_label": None, "k_interval": k_interval,
         "ma20": None, "ma42": None, "ma60": None,
         "above_ma20": None, "above_ma42": None, "above_ma60": None,
         "ma20_rising": None, "ma42_rising": None, "ma60_rising": None,
         "cross_above_20": False, "cross_below_20": False,
+        "ma_custom_n": ma_custom_n, "ma_custom": None, "above_ma_custom": None,
         "dif": None, "macd_signal": None, "dif_above_signal": None,
         "entry_type": None,
         "entry_blocked": False, "entry_block_reason": "",
@@ -2025,29 +2046,19 @@ def analyze_stock(tid, name, mtype,
         "mom_pct": mom_pct, "mom_grade": mom_grade,
         "fin_quality": fin_quality or {},
         "error": None, "channel": None, "vol_surge": None,
-        "ma_custom_n": None, "ma_custom": None, "above_ma_custom": None,
     }
 
-    # 若啟用了大於200日的自訂均線，需拉更長的日K歷史資料
-    period_days = 200
-    if ma_above_n and ma_above_n > 170:
-        period_days = ma_above_n + 40
+    # 若使用者設定了自訂均線天數，且大於預設抓取天數，需延長日K抓取區間
+    days_needed = 200
+    if ma_custom_n:
+        days_needed = max(days_needed, int(ma_custom_n) + 30)
 
-    df_day = fetch_day(tid, mtype, period_days=period_days)
+    df_day = fetch_day(tid, mtype, days_needed=days_needed)
     if df_day.empty:
         result["error"] = "無日K資料"; return result
     close = df_day["Close"]
     price = float(close.iloc[-1])
     result["price"] = price
-
-    # ── ★ v5.0 自訂 N 日均線「站上」篩選 ──────────────────────────────────────
-    if ma_above_n and ma_above_n >= 1:
-        ma_c = calc_ma(close, ma_above_n)
-        if ma_c is not None and not pd.isna(ma_c.iloc[-1]):
-            v = float(ma_c.iloc[-1])
-            result["ma_custom_n"]     = ma_above_n
-            result["ma_custom"]       = round(v, 2)
-            result["above_ma_custom"] = price > v
 
     ma_series = {}
     for n in [20, 42, 60]:
@@ -2060,6 +2071,22 @@ def analyze_stock(tid, name, mtype,
     for n in [20, 42, 60]:
         if n in ma_series:
             result[f"ma{n}_rising"] = ma_slope_rising(ma_series[n])
+
+    # ── 自訂均線（1-600日）──────────────────────────────────────────────
+    if ma_custom_n:
+        n_custom = int(ma_custom_n)
+        if n_custom in ma_series:
+            result["ma_custom"]      = result[f"ma{n_custom}"]
+            result["above_ma_custom"] = result[f"above_ma{n_custom}"]
+        else:
+            ma_c = calc_ma(close, n_custom)
+            if ma_c is not None and len(ma_c) and not pd.isna(ma_c.iloc[-1]):
+                v = float(ma_c.iloc[-1])
+                result["ma_custom"]       = round(v, 2)
+                result["above_ma_custom"] = price > v
+            else:
+                result["ma_custom"] = None
+                result["above_ma_custom"] = None
 
     if 20 in ma_series:
         result["cross_above_20"] = price_crossed_above(close, ma_series[20])
@@ -2081,34 +2108,30 @@ def analyze_stock(tid, name, mtype,
     k_series, _ = calc_kd(df_60m)
     if k_series is None:
         result["error"] = "KD計算失敗"; return result
-    k_val = float(k_series.iloc[-1])
-    result["k60"]     = round(k_val, 1)
+    k_val_60 = float(k_series.iloc[-1])
+    result["k60"]     = round(k_val_60, 1)
     result["k_label"] = k_label
+
+    # ── 依使用者選擇的K值週期，計算實際用於進場判斷的K值 ─────────────────────
+    if k_interval == '60m':
+        k_val, k_sel_label = k_val_60, '60分K'
+    else:
+        k_val, k_sel_label = calc_k_by_interval(df_day, df_60m, k_interval)
+    result["k_selected"]       = round(k_val, 1) if k_val is not None else None
+    result["k_selected_label"] = k_sel_label
+    if k_val is None:
+        result["error"] = f"無{k_sel_label}資料，無法判斷K值"
+        return result
 
     channel = detect_channel(df_60m, price)
     result["channel"]   = channel
-    result["vol_surge"] = detect_volume_surge_v43(df_60m, k_val, channel)
+    result["vol_surge"] = detect_volume_surge_v43(df_60m, k_val_60, channel)
 
     exit_info = calc_exit_signals(df_day, df_60m, price, entry_price, active_params)
     result["exit_info"] = exit_info
 
-    # ── ★ v5.0 日K / 週K 的K值（供「K值週期」選擇使用；60分K死叉/通道等仍固定用60分K） ──
-    k_day_s, _ = calc_kd(df_day)
-    if k_day_s is not None and not k_day_s.empty and not pd.isna(k_day_s.iloc[-1]):
-        result["k_day"] = round(float(k_day_s.iloc[-1]), 1)
-
-    df_week = resample_to_weekly(df_day)
-    if len(df_week) >= 6:
-        k_week_s, _ = calc_kd(df_week)
-        if k_week_s is not None and not k_week_s.empty and not pd.isna(k_week_s.iloc[-1]):
-            result["k_week"] = round(float(k_week_s.iloc[-1]), 1)
-
-    _k_by_period = {'60m': result["k60"], 'day': result["k_day"], 'week': result["k_week"]}
-    k_entry = _k_by_period.get(k_period)
-    result["k_entry"] = k_entry
-
     # ── 進場條件 ──────────────────────────────────────────────────────────────
-    k_low  = (k_entry is not None) and (k_entry <= k_thr)
+    k_low  = k_val <= k_thr
     m20r   = result["ma20_rising"]
     m42r   = result["ma42_rising"]
     m60r   = result["ma60_rising"]
@@ -2141,17 +2164,6 @@ def analyze_stock(tid, name, mtype,
             result["entry_blocked"]      = True
             result["entry_block_reason"] = f'📋財務品質不達標：{reasons}'
             result["fin_blocked"]        = True
-            return result
-
-    # ── ★ v5.0 自訂均線站上阻擋 ────────────────────────────────────────────────
-    if ma_above_n and ma_above_n >= 1:
-        if result["above_ma_custom"] is not True:
-            result["entry_blocked"]      = True
-            mac = result["ma_custom"]
-            result["entry_block_reason"] = (
-                f'📈未站上{ma_above_n}日均線'
-                + (f'（{price:.2f}<{mac:.2f}）' if mac is not None else ''))
-            result["ma_custom_blocked"]  = True
             return result
 
     a60_ok = (not A_CLASS_REQUIRE_60MA) or (a60 and m60r is True)

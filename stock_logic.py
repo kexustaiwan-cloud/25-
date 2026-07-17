@@ -45,6 +45,8 @@ def _run_scan(params, progress_bar, status_box):
     sc.GROSS_MARGIN_MIN = params['gross_margin_min']
     sc.OP_MARGIN_MIN = params['op_margin_min']
     sc.FIN_BLOCK_ON_FAIL = params['fin_block']
+    k_interval  = params.get('k_interval', '60m')
+    ma_custom_n = params.get('ma_custom_n')
     _log('掃描模組就緒', 5)
 
     # ── Step 1: 撿股讚基本面 ──────────────────────────────────────────
@@ -113,6 +115,8 @@ def _run_scan(params, progress_bar, status_box):
                 active_params=active_params_stock,
                 mom_pct=sc.get_mom_pct(tid, fund_df, mom_dict),
                 fin_quality=fin_dict.get(tid),
+                k_interval=k_interval,
+                ma_custom_n=ma_custom_n,
             )
             results.append(_r2d(r))
         except Exception as e:
@@ -150,6 +154,17 @@ def run():
     # ── 篩選參數（側邊欄） ──────────────────────────────────────────
     st.sidebar.markdown("### 🎛️ 掃描參數")
     k_threshold = st.sidebar.number_input("K值門檻（≤）", value=30, step=1)
+
+    k_interval_label = st.sidebar.selectbox(
+        "K值週期", ["60分K", "日K", "週K"], index=0,
+        help="用來判斷「K值門檻」的K棒週期：60分K（原始預設）／日K／週K")
+    _K_INTERVAL_MAP = {"60分K": "60m", "日K": "day", "週K": "week"}
+    k_interval = _K_INTERVAL_MAP[k_interval_label]
+
+    ma_custom_n = st.sidebar.number_input(
+        "股價高於N日均線（1-600）", min_value=1, max_value=600, value=20, step=1,
+        help="額外標記股價是否高於此天數的移動平均線，可自訂天數")
+
     yoy_min = st.sidebar.number_input("營收YOY最低(%)", value=15.0, step=1.0)
     gross_margin_min = st.sidebar.number_input("毛利率最低(%)", value=25.0, step=1.0)
     op_margin_min = st.sidebar.number_input("營益率最低(%)", value=15.0, step=1.0)
@@ -157,6 +172,9 @@ def run():
 
     params = {
         'k_threshold': int(k_threshold),
+        'k_interval': k_interval,
+        'k_interval_label': k_interval_label,
+        'ma_custom_n': int(ma_custom_n),
         'yoy_min': float(yoy_min),
         'gross_margin_min': float(gross_margin_min),
         'op_margin_min': float(op_margin_min),
@@ -194,12 +212,57 @@ def run():
         regime = st.session_state.get('scan_regime')
         if regime:
             st.markdown("#### 📊 大盤狀態")
-            st.json(regime)
+
+            icon     = regime.get('icon', '')
+            name_    = regime.get('name', '')
+            score    = regime.get('score', 0)
+            position = regime.get('position', '─')
+            strategy = regime.get('strategy', '─')
+
+            c1, c2, c3 = st.columns([1, 1, 2])
+            c1.metric("大盤燈號", f"{icon} {name_}")
+            c2.metric("綜合分數", f"{score} 分")
+            with c3:
+                st.markdown(f"**建議倉位：** {position}")
+                st.markdown(f"**操作策略：** {strategy}")
+
+            if regime.get('warn_2022') or regime.get('overheat'):
+                warn_msg = regime.get('warn_msg') or '⚠️ 大盤出現警示訊號，請留意風險'
+                st.warning(warn_msg)
+
+            detail = regime.get('detail', {})
+            if detail:
+                st.markdown("###### 細項評分")
+                for label, val in detail.items():
+                    if isinstance(val, (list, tuple)) and len(val) >= 2:
+                        pts, desc = val[0], val[1]
+                        st.markdown(f"- **{label}**：{pts} 分 — {desc}")
+                    else:
+                        st.markdown(f"- **{label}**：{val}")
+
+            tw_last = regime.get('tw_last')
+            last_update = regime.get('last_update')
+            if tw_last or last_update:
+                c4, c5 = st.columns(2)
+                if tw_last:
+                    c4.metric("加權指數", f"{tw_last:,.0f}")
+                if last_update:
+                    try:
+                        dt_str = datetime.fromtimestamp(
+                            last_update, TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        dt_str = str(last_update)
+                    c5.metric("資料更新時間", dt_str)
 
         st.markdown("#### 📈 個股掃描結果")
         results = st.session_state.get('scan_results', [])
         if results:
             df = pd.DataFrame(results)
+            ma_n = params.get('ma_custom_n', 20)
+            if 'above_ma_custom' in df.columns:
+                only_above = st.checkbox(f"只顯示股價高於 {ma_n} 日均線的股票", value=False)
+                if only_above:
+                    df = df[df['above_ma_custom'] == True]
             st.dataframe(df, use_container_width=True)
         else:
             st.info("本次掃描沒有符合條件的個股。")
