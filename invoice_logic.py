@@ -7,7 +7,7 @@ import pandas as pd
 
 def run():
     # 這是原本的程式碼，全部縮排在 run() 裡面
-    st.title("🧾 25型發票資料辨識系統")
+
     st.subheader("如有問題可發送信件至 KexusTaiwan@gmail.com")
 
     # 1. 憑證載入機制
