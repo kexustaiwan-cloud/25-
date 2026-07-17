@@ -1,6 +1,6 @@
 import streamlit as st
 import invoice_logic
-import stock_logic
+import value_scan_logic
 import calculator_logic
 
 # =========================
@@ -42,7 +42,7 @@ elif choice == "📈 即時價值投資股掃描":
     st.title("📈 即時價值投資股掃描")
     st.caption("依據財務條件與價值投資指標進行股票篩選")
 
-    stock_logic.run()
+    value_scan_logic.run()
 
 elif choice == "📐 股價反彈/回檔計算":
 
