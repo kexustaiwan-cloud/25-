@@ -233,13 +233,21 @@ def run():
         f"每 {os.environ.get('SCAN_INTERVAL_MIN', '15')} 分鐘更新一次，"
         f"所有訪客共用同一份，不會互相卡住或搶資源。"
     )
-    with st.sidebar.expander("目前使用的預設參數"):
-        st.write(DEFAULT_SCAN_PARAMS)
-
     st.sidebar.markdown("---")
     _admin_login_ui()
 
     if st.session_state.get('is_admin'):
+        with st.sidebar.expander("目前使用的預設參數（管理者可見）"):
+            st.markdown(f"""
+- K值門檻（≤）：**{DEFAULT_SCAN_PARAMS['k_threshold']}**
+- K值週期：**{DEFAULT_SCAN_PARAMS['k_interval_label']}**
+- 股價高於 N 日均線：**{DEFAULT_SCAN_PARAMS['ma_custom_n']} 日**
+- 營收YOY最低：**{DEFAULT_SCAN_PARAMS['yoy_min']}%**
+- 毛利率最低：**{DEFAULT_SCAN_PARAMS['gross_margin_min']}%**
+- 營益率最低：**{DEFAULT_SCAN_PARAMS['op_margin_min']}%**
+- 財務不達標時排除：**{'是' if DEFAULT_SCAN_PARAMS['fin_block'] else '否'}**
+""")
+
         with st.sidebar.expander("🔧 進階：手動觸發即時掃描（管理用途）"):
             st.caption("會暫時佔用運算資源跑一次即時掃描，完成後直接覆蓋公開快取，所有訪客都會看到新結果。")
             k_threshold = st.number_input("K值門檻（≤）", value=30, step=1, key='adv_k')
