@@ -1286,6 +1286,7 @@ def priority_score(industry: str) -> int:
 # 市場風向儀
 # =============================================================================
 _regime_cache = {'score': None, 'level': None, 'detail': {}, 'last_update': 0}
+_ma_status_cache = {'tw_last': None, 'last_update': 0}
 REGIME_CACHE_SEC = 900
 
 
@@ -1390,6 +1391,44 @@ def _score_to_regime(score):
                     'position': pos, 'strategy': strat}
     return {'level': 1, 'icon': '🔴', 'name': '熊市/崩盤',
             'position': '清空倉位 0~10%', 'strategy': '嚴禁做多，空手觀望'}
+
+
+def calc_market_ma_status(force=False):
+    """
+    大盤（加權指數 ^TWII）目前指數，以及日線收盤價相對 20/60/180 日均線的位置。
+    不做任何評分/燈號判斷，只單純呈現數字事實，給使用者自行判斷。
+    回傳 dict：
+        tw_last    ：最新收盤指數
+        ma20/ma60/ma180 ： {'ma': 均線值, 'pct': 乖離%, 'above': 是否站上} 或 None（資料不足）
+        last_update：計算時間（epoch秒）
+    """
+    now = time.time()
+    if not force and _ma_status_cache.get('tw_last') is not None \
+            and now - _ma_status_cache.get('last_update', 0) < REGIME_CACHE_SEC:
+        return _ma_status_cache
+
+    tw_df = _fetch_index('^TWII', 5)
+    if tw_df.empty:
+        return {}
+    close = tw_df['Close']
+    last = float(close.iloc[-1])
+
+    def _ma_stat(n):
+        if len(close) < n:
+            return None
+        ma = float(close.rolling(n).mean().iloc[-1])
+        pct = (last - ma) / ma * 100
+        return {'ma': ma, 'pct': pct, 'above': last > ma}
+
+    result = {
+        'tw_last':     last,
+        'ma20':        _ma_stat(20),
+        'ma60':        _ma_stat(60),
+        'ma180':       _ma_stat(180),
+        'last_update': now,
+    }
+    _ma_status_cache.update(result)
+    return result
 
 
 def calc_market_regime(force=False):

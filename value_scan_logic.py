@@ -97,13 +97,13 @@ def _run_scan_core(params, log_fn):
                if params['fin_block'] else stocks)
     log_fn(f'財務篩選後：{len(scan_st)} 檔（財務達標 {len(fin_set)}/{len(stocks)}）', 40)
 
-    # ── Step 4: 大盤狀態 ──────────────────────────────────────────────
-    log_fn('計算大盤狀態...', 43)
+    # ── Step 4: 大盤指數/均線 ────────────────────────────────────────
+    log_fn('計算大盤指數與均線位置...', 43)
     try:
-        regime = sc.calc_market_regime(force=True)
+        regime = sc.calc_market_ma_status(force=True)
     except Exception as e:
         regime = {}
-        log_fn(f'大盤狀態計算失敗（跳過）：{e}', 43)
+        log_fn(f'大盤指數計算失敗（跳過）：{e}', 43)
 
     # ── Step 5: ETF 掃描 ──────────────────────────────────────────────
     log_fn('掃描主動式 ETF...', 46)
@@ -321,48 +321,33 @@ def run():
 
     regime = cached.get('regime')
     if regime:
-        st.markdown("#### 📊 大盤狀態")
-
-        icon     = regime.get('icon', '')
-        name_    = regime.get('name', '')
-        score    = regime.get('score', 0)
-        position = regime.get('position', '─')
-        strategy = regime.get('strategy', '─')
-
-        c1, c2, c3 = st.columns([1, 1, 2])
-        c1.metric("大盤燈號", f"{icon} {name_}")
-        c2.metric("綜合分數", f"{score} 分")
-        with c3:
-            st.markdown(f"**建議倉位：** {position}")
-            st.markdown(f"**操作策略：** {strategy}")
-
-        if regime.get('warn_2022') or regime.get('overheat'):
-            warn_msg = regime.get('warn_msg') or '⚠️ 大盤出現警示訊號，請留意風險'
-            st.warning(warn_msg)
-
-        detail = regime.get('detail', {})
-        if detail:
-            st.markdown("###### 細項評分")
-            for label, val in detail.items():
-                if isinstance(val, (list, tuple)) and len(val) >= 2:
-                    pts, desc = val[0], val[1]
-                    st.markdown(f"- **{label}**：{pts} 分 — {desc}")
-                else:
-                    st.markdown(f"- **{label}**：{val}")
+        st.markdown("#### 📊 大盤指數與均線位置")
 
         tw_last = regime.get('tw_last')
+        if tw_last:
+            st.metric("加權指數", f"{tw_last:,.0f}")
+
+        def _ma_line(label, info):
+            if not info:
+                st.markdown(f"- **{label}**：資料不足")
+                return
+            if info['above']:
+                st.markdown(f"- **{label}**：🟢 站上（乖離 {info['pct']:+.1f}%，均線 {info['ma']:,.0f}）")
+            else:
+                st.markdown(f"- **{label}**：🔴 跌破（乖離 {info['pct']:+.1f}%，均線 {info['ma']:,.0f}）")
+
+        _ma_line("日線 20MA", regime.get('ma20'))
+        _ma_line("日線 60MA", regime.get('ma60'))
+        _ma_line("日線 180MA", regime.get('ma180'))
+
         last_update = regime.get('last_update')
-        if tw_last or last_update:
-            c4, c5 = st.columns(2)
-            if tw_last:
-                c4.metric("加權指數", f"{tw_last:,.0f}")
-            if last_update:
-                try:
-                    dt_str = datetime.fromtimestamp(
-                        last_update, TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
-                except Exception:
-                    dt_str = str(last_update)
-                c5.metric("資料更新時間", dt_str)
+        if last_update:
+            try:
+                dt_str = datetime.fromtimestamp(
+                    last_update, TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                dt_str = str(last_update)
+            st.caption(f"資料更新時間：{dt_str}")
 
     st.markdown("#### 📈 個股掃描結果")
     results = cached.get('results', [])
