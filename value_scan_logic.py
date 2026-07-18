@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import threading
 from datetime import datetime
 import pytz
 
@@ -237,19 +238,12 @@ def run():
     _admin_login_ui()
 
     if st.session_state.get('is_admin'):
-        with st.sidebar.expander("目前使用的預設參數（管理者可見）"):
-            st.markdown(f"""
-- K值門檻（≤）：**{DEFAULT_SCAN_PARAMS['k_threshold']}**
-- K值週期：**{DEFAULT_SCAN_PARAMS['k_interval_label']}**
-- 股價高於 N 日均線：**{DEFAULT_SCAN_PARAMS['ma_custom_n']} 日**
-- 營收YOY最低：**{DEFAULT_SCAN_PARAMS['yoy_min']}%**
-- 毛利率最低：**{DEFAULT_SCAN_PARAMS['gross_margin_min']}%**
-- 營益率最低：**{DEFAULT_SCAN_PARAMS['op_margin_min']}%**
-- 財務不達標時排除：**{'是' if DEFAULT_SCAN_PARAMS['fin_block'] else '否'}**
-""")
-
         with st.sidebar.expander("🔧 進階：手動觸發即時掃描（管理用途）"):
-            st.caption("會暫時佔用運算資源跑一次即時掃描，完成後直接覆蓋公開快取，所有訪客都會看到新結果。")
+            st.caption(
+                "按下後會在背景執行緒跑一次掃描，完成後直接覆蓋公開快取，所有訪客都會看到新結果。"
+                "這個畫面不會被卡住，你可以直接切換到別的分頁或稍後回來看結果，"
+                "避免長時間等待造成連線逾時、被迫重新登入。"
+            )
             k_threshold = st.number_input("K值門檻（≤）", value=30, step=1, key='adv_k')
             k_interval_label = st.selectbox(
                 "K值週期", ["60分K", "日K", "週K"], index=0, key='adv_ki')
@@ -272,17 +266,16 @@ def run():
                 'fin_block':        bool(fin_block),
             }
 
-            if st.button("🚀 立即執行即時掃描（會覆蓋公開快取）", type="primary"):
-                progress_bar = st.progress(0)
-                status_box = st.empty()
-                try:
-                    with st.spinner("掃描進行中，請稍候..."):
-                        results, etf_results, regime, stats = _run_scan(
-                            adv_params, progress_bar, status_box)
-                    scan_cache.save_scan(results, etf_results, regime, stats, adv_params, status='ok')
-                    st.success("掃描完成，已更新公開快取！")
-                except Exception as e:
-                    st.error(f"❌ 掃描失敗：{e}")
+            if st.button("🚀 立即觸發即時掃描（背景執行，不卡畫面）", type="primary"):
+                def _bg_run(params):
+                    scan_scheduler.run_scan_once(params, _run_scan_core)
+
+                t = threading.Thread(target=_bg_run, args=(adv_params,), daemon=True)
+                t.start()
+                st.success(
+                    "已送出，背景正在掃描中。過一陣子按「🔄 重新整理頁面」就會看到最新結果，"
+                    "或觀察上方排程狀態變成「🟢 待命中」代表已完成。"
+                )
     else:
         st.sidebar.caption("🔒 手動即時掃描僅限管理者使用，請先於上方登入。")
 
@@ -304,6 +297,19 @@ def run():
 
     if cache_status.get('status') == 'error' and cache_status.get('message'):
         st.warning(f"背景掃描錯誤訊息：{cache_status['message']}")
+
+    used_params = cached.get('params', DEFAULT_SCAN_PARAMS)
+    with st.expander("⚙️ 本次掃描使用的參數設定", expanded=False):
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("K值門檻（≤）", used_params.get('k_threshold', '-'))
+        p1.caption(f"週期：{used_params.get('k_interval_label', '-')}")
+        p2.metric("均線天數", f"{used_params.get('ma_custom_n', '-')} 日")
+        p3.metric("營收YOY最低", f"{used_params.get('yoy_min', '-')}%")
+        p4.metric("毛利率最低", f"{used_params.get('gross_margin_min', '-')}%")
+        st.caption(
+            f"營益率最低：{used_params.get('op_margin_min', '-')}%　|　"
+            f"財務不達標時排除：{'是' if used_params.get('fin_block') else '否'}"
+        )
 
     stats = cached.get('stats', {})
     if stats:
