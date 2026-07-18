@@ -299,7 +299,7 @@ def run():
         st.warning(f"背景掃描錯誤訊息：{cache_status['message']}")
 
     used_params = cached.get('params', DEFAULT_SCAN_PARAMS)
-    with st.expander("⚙️ 本次掃描使用的參數設定", expanded=False):
+    with st.expander("⚙️ 本次掃描使用的參數設定", expanded=True):
         p1, p2, p3, p4 = st.columns(4)
         p1.metric("K值門檻（≤）", used_params.get('k_threshold', '-'))
         p1.caption(f"週期：{used_params.get('k_interval_label', '-')}")
@@ -350,14 +350,25 @@ def run():
             st.caption(f"資料更新時間：{dt_str}")
 
     st.markdown("#### 📈 個股掃描結果")
+    st.caption(
+        f"以下個股為符合「營收YOY≥{used_params.get('yoy_min','-')}%、"
+        f"毛利率≥{used_params.get('gross_margin_min','-')}%、"
+        f"營益率≥{used_params.get('op_margin_min','-')}%"
+        f"{'、財務不達標已排除' if used_params.get('fin_block') else ''}、"
+        f"K值({used_params.get('k_interval_label','-')})≤{used_params.get('k_threshold','-')}」"
+        f"條件篩選出的結果。"
+    )
     results = cached.get('results', [])
     if results:
         df = pd.DataFrame(results)
-        ma_n = cached.get('params', {}).get('ma_custom_n', 20)
+        ma_n = used_params.get('ma_custom_n', 20)
         if 'above_ma_custom' in df.columns:
-            only_above = st.checkbox(f"只顯示股價高於 {ma_n} 日均線的股票", value=False)
+            total_n = len(df)
+            only_above = st.checkbox(
+                f"只顯示股價高於 {ma_n} 日均線的股票", value=False, key='only_above_ma_checkbox')
             if only_above:
                 df = df[df['above_ma_custom'] == True]
+            st.caption(f"目前顯示 {len(df)} / {total_n} 檔")
         st.dataframe(df, use_container_width=True)
     else:
         st.info("本次掃描沒有符合條件的個股。")
