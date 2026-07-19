@@ -96,16 +96,38 @@ def load_scan():
     return payload
 
 
-def save_scan_status(status, message=None):
-    """更新排程執行狀態（'running' / 'idle' / 'error'），不動掃描結果本體。"""
-    _upsert('status', {'status': status, 'message': message})
+def save_scan_status(status, message=None, pct=None):
+    """更新排程執行狀態（'running' / 'idle' / 'error'）＋進度百分比，不動掃描結果本體。"""
+    _upsert('status', {'status': status, 'message': message, 'pct': pct})
 
 
 def load_scan_status():
     row = _select('status')
     if not row:
-        return {'status': 'idle', 'message': None}
+        return {'status': 'idle', 'message': None, 'pct': None}
     try:
-        return json.loads(row[0])
+        data = json.loads(row[0])
+        data.setdefault('pct', None)
+        return data
     except Exception:
-        return {'status': 'idle', 'message': None}
+        return {'status': 'idle', 'message': None, 'pct': None}
+
+
+def save_active_params(params):
+    """
+    記錄「目前生效中」的掃描參數。
+    只要管理者手動觸發過一次自訂參數的掃描，之後背景排程（每 SCAN_INTERVAL_MIN
+    分鐘一次）就會沿用這組參數繼續掃描，不會每輪都被寫死的預設值蓋掉。
+    """
+    _upsert('active_params', {'params': params})
+
+
+def load_active_params():
+    """讀取目前生效中的參數；若尚未有任何人設定過，回傳 None（呼叫端應改用預設值）。"""
+    row = _select('active_params')
+    if not row:
+        return None
+    try:
+        return json.loads(row[0]).get('params')
+    except Exception:
+        return None

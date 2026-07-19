@@ -74,15 +74,21 @@ def run_scan_once(params, run_scan_core_fn):
         print('[scan_scheduler] 已有掃描在進行中，本輪排程略過')
         return False
     try:
-        scan_cache.save_scan_status('running')
+        scan_cache.save_scan_status('running', pct=0)
 
         def _log(msg, pct=None):
             print(f'[scan_scheduler] {msg}')
+            # 把即時進度寫進共用快取，讓任何人看網頁時都能看到目前掃描到哪裡，
+            # 不用等整個掃描跑完才有畫面反應。
+            scan_cache.save_scan_status('running', message=msg, pct=pct)
 
         try:
             results, etf_results, regime, stats = run_scan_core_fn(params, _log)
             scan_cache.save_scan(results, etf_results, regime, stats, params, status='ok')
-            scan_cache.save_scan_status('idle')
+            scan_cache.save_scan_status('idle', pct=100)
+            # 這組參數（不論是排程預設或管理者手動調整）成功跑完，
+            # 就把它記錄成「目前生效參數」，下一輪排程會沿用這組，不會被寫死的預設值蓋掉。
+            scan_cache.save_active_params(params)
             print('[scan_scheduler] 本輪排程掃描完成，已更新快取')
             return True
         except Exception as e:
@@ -93,6 +99,20 @@ def run_scan_once(params, run_scan_core_fn):
             return False
     finally:
         _scan_lock.release()
+
+
+def _current_params(default_params):
+    """
+    決定「這一輪」該用哪組參數掃描：
+    - 如果曾經有人（管理者手動觸發，或先前的排程）成功跑完一次掃描，
+      優先沿用那組「目前生效參數」。
+    - 只有在完全沒有任何生效參數紀錄時（例如剛部署、第一次啟動），
+      才會退回使用寫死的 default_params。
+    這樣管理者手動調整過的參數，會一直持續生效到下次管理者再改，
+    不會被排程用舊的預設值蓋掉。
+    """
+    active = scan_cache.load_active_params()
+    return active if active else default_params
 
 
 def _loop(default_params, run_scan_core_fn):
@@ -106,7 +126,7 @@ def _loop(default_params, run_scan_core_fn):
     # ── 啟動時先跑一次，並且失敗就快速重試，直到成功 ──────────────────
     while True:
         try:
-            ok = run_scan_once(default_params, run_scan_core_fn)
+            ok = run_scan_once(_current_params(default_params), run_scan_core_fn)
         except Exception as e:
             ok = False
             print(f'[scan_scheduler] 啟動時掃描發生未攔截例外：{e}')
@@ -120,7 +140,7 @@ def _loop(default_params, run_scan_core_fn):
         try:
             time.sleep(max(60, SCAN_INTERVAL_MIN * 60))
             if (not ONLY_MARKET_HOURS) or _in_market_window():
-                run_scan_once(default_params, run_scan_core_fn)
+                run_scan_once(_current_params(default_params), run_scan_core_fn)
             else:
                 print('[scan_scheduler] 非盤中時間，略過本輪掃描')
         except Exception as e:

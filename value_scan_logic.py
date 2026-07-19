@@ -4,6 +4,7 @@ import os
 import threading
 from datetime import datetime
 import pytz
+from streamlit_autorefresh import st_autorefresh
 
 import scan_cache
 import scan_scheduler
@@ -15,15 +16,17 @@ TW_TZ = pytz.timezone('Asia/Taipei')
 # 其他所有訪客一律只能看背景排程寫進快取的公開結果（唯讀）。
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
 
-# 公開頁面使用的「背景排程掃描」預設參數 —— 所有訪客共用同一份結果，
-# 就是靠固定這組參數去掃描、寫入快取，大家看到的都是同一份。
+# 公開頁面使用的「背景排程掃描」預設參數 —— 只有在完全沒有任何管理者手動
+# 設定過參數的情況下（例如第一次部署、process 剛重啟）才會用這組當起點。
+# 管理者手動觸發過即時掃描後，之後排程會改沿用管理者當時設定的參數
+# （詳見 scan_cache.save_active_params / scan_scheduler._current_params）。
 DEFAULT_SCAN_PARAMS = {
     'k_threshold':       30,
-    'k_interval':        '60m',
-    'k_interval_label':  '60分K',
-    'ma_custom_n':       20,
-    'yoy_min':           15.0,
-    'gross_margin_min':  25.0,
+    'k_interval':        'day',
+    'k_interval_label':  '日K',
+    'ma_custom_n':       60,
+    'yoy_min':           20.0,
+    'gross_margin_min':  30.0,
     'op_margin_min':     15.0,
     'fin_block':         True,
 }
@@ -218,6 +221,12 @@ def run():
 
     cache_status = scan_cache.load_scan_status()
 
+    # 掃描進行中時，每 4 秒自動重新整理一次頁面，
+    # 這樣不管是排程掃描還是管理者手動觸發的掃描，進度／完成後的新結果
+    # 都會自動反映出來，不用手動按重新整理。掃描結束（idle/error）後就不會再自動刷新。
+    if cache_status.get('status') == 'running':
+        st_autorefresh(interval=4000, key='scan_progress_autorefresh')
+
     st.sidebar.markdown("### 🎛️ 掃描設定")
     st.sidebar.caption(
         f"公開頁面顯示的是背景自動掃描結果（固定參數），"
@@ -234,16 +243,25 @@ def run():
                 "這個畫面不會被卡住，你可以直接切換到別的分頁或稍後回來看結果，"
                 "避免長時間等待造成連線逾時、被迫重新登入。"
             )
-            k_threshold = st.number_input("K值門檻（≤）", value=30, step=1, key='adv_k')
-            k_interval_label = st.selectbox(
-                "K值週期", ["60分K", "日K", "週K"], index=0, key='adv_ki')
+            _K_INTERVAL_OPTIONS = ["60分K", "日K", "週K"]
             _K_INTERVAL_MAP = {"60分K": "60m", "日K": "day", "週K": "week"}
+            k_threshold = st.number_input(
+                "K值門檻（≤）", value=DEFAULT_SCAN_PARAMS['k_threshold'], step=1, key='adv_k')
+            k_interval_label = st.selectbox(
+                "K值週期", _K_INTERVAL_OPTIONS,
+                index=_K_INTERVAL_OPTIONS.index(DEFAULT_SCAN_PARAMS['k_interval_label']),
+                key='adv_ki')
             ma_custom_n = st.number_input(
-                "股價高於N日均線（1-600）", min_value=1, max_value=600, value=20, step=1, key='adv_ma')
-            yoy_min = st.number_input("營收YOY最低(%)", value=15.0, step=1.0, key='adv_yoy')
-            gross_margin_min = st.number_input("毛利率最低(%)", value=25.0, step=1.0, key='adv_gm')
-            op_margin_min = st.number_input("營益率最低(%)", value=15.0, step=1.0, key='adv_om')
-            fin_block = st.checkbox("財務不達標時排除", value=True, key='adv_fb')
+                "股價高於N日均線（1-600）", min_value=1, max_value=600,
+                value=DEFAULT_SCAN_PARAMS['ma_custom_n'], step=1, key='adv_ma')
+            yoy_min = st.number_input(
+                "營收YOY最低(%)", value=DEFAULT_SCAN_PARAMS['yoy_min'], step=1.0, key='adv_yoy')
+            gross_margin_min = st.number_input(
+                "毛利率最低(%)", value=DEFAULT_SCAN_PARAMS['gross_margin_min'], step=1.0, key='adv_gm')
+            op_margin_min = st.number_input(
+                "營益率最低(%)", value=DEFAULT_SCAN_PARAMS['op_margin_min'], step=1.0, key='adv_om')
+            fin_block = st.checkbox(
+                "財務不達標時排除", value=DEFAULT_SCAN_PARAMS['fin_block'], key='adv_fb')
 
             adv_params = {
                 'k_threshold':      int(k_threshold),
@@ -263,8 +281,8 @@ def run():
                 t = threading.Thread(target=_bg_run, args=(adv_params,), daemon=True)
                 t.start()
                 st.success(
-                    "已送出，背景正在掃描中。過一陣子按「🔄 重新整理頁面」就會看到最新結果，"
-                    "或觀察上方排程狀態變成「🟢 待命中」代表已完成。"
+                    "已送出，背景正在掃描中。這個頁面會每 4 秒自動更新，"
+                    "下方會顯示即時進度百分比，完成後會自動換成新結果，不用手動重新整理。"
                 )
     else:
         st.sidebar.caption("🔒 手動即時掃描僅限管理者使用，請先於上方登入。")
@@ -284,6 +302,14 @@ def run():
         'error':   '🔴 上次排程掃描失敗（將於下次排程自動重試）',
     }.get(cache_status.get('status'), '─')
     st.caption(f"最後掃描時間：{cached.get('scan_time', '')}　|　排程狀態：{status_label}")
+
+    if cache_status.get('status') == 'running':
+        pct = cache_status.get('pct') or 0
+        pct = min(max(int(pct), 0), 100)
+        st.progress(pct / 100)
+        if cache_status.get('message'):
+            st.caption(f"目前進度：{cache_status['message']}（{pct}%）")
+        st.caption("頁面每 4 秒會自動更新一次，不用手動重新整理。")
 
     if cache_status.get('status') == 'error' and cache_status.get('message'):
         st.warning(f"背景掃描錯誤訊息：{cache_status['message']}")
@@ -370,3 +396,20 @@ def run():
         st.dataframe(df_etf, use_container_width=True)
     else:
         st.info("本次掃描沒有 ETF 結果。")
+
+    st.markdown("---")
+    with st.expander("ℹ️ 選股邏輯說明：本掃描排除哪些產業", expanded=False):
+        try:
+            import scanner_core as sc
+            excluded = getattr(sc, 'EXCLUDE_INDUSTRIES', [])
+        except Exception:
+            excluded = []
+        if excluded:
+            st.caption(
+                "為了聚焦一般產業股的價值投資機會（避開受景氣循環、法規、"
+                "資產評價方式差異較大的產業），以下類別的個股不會出現在掃描結果中："
+            )
+            st.write("、".join(excluded))
+        else:
+            st.caption("排除產業清單目前無法讀取。")
+
