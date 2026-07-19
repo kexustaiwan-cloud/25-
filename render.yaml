@@ -5,10 +5,9 @@ services:
     buildCommand: pip install -r requirements.txt
     # 掃描邏輯已改成「背景排程執行緒」寫入共用快取（scan_cache.py），
     # 網頁請求只負責讀快取顯示，所以仍然可以維持 1 個 worker，
-    # 但如果你的入口是 Streamlit（streamlit run app.py），
-    # 請把 startCommand 換成對應的 streamlit 指令，
-    # 且千萬不要開多個 worker/process，否則背景排程執行緒會被重複啟動好幾份。
-    startCommand: gunicorn app:app --workers 1 --threads 8 --worker-class gthread --timeout 300 --bind 0.0.0.0:$PORT
+    # 入口是 Streamlit（APP.py），千萬不要開多個 worker/process，
+    # 否則背景排程執行緒會被重複啟動好幾份，互搶運算資源。
+    startCommand: streamlit run APP.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     plan: free
     envVars:
       - key: PYTHON_VERSION
@@ -16,14 +15,22 @@ services:
       - key: SCAN_TIMEOUT_SEC
         value: "270"
       - key: ADMIN_PASSWORD
-        value: "admin_bob0309"
+        value: "bob0309"   # 請以 Render 後台 Environment 分頁實際設定的值為準，這裡只是預設參考值
       # ↓ 背景排程掃描設定
       - key: SCAN_INTERVAL_MIN
         value: "15"          # 幾分鐘背景重新掃描一次
       - key: ONLY_MARKET_HOURS
         value: "1"            # 1=只在台股盤中時間掃描，省資源；0=全天候
-    # ⚠️ 注意：Render 免費方案的 Web Service 閒置 15 分鐘沒人連線會自動休眠，
-    # 背景排程執行緒也會跟著暫停。如果想要「隨時都有人看，資料也隨時在更新」，
-    # 需要搭配一個免費的外部喚醒服務（例如 UptimeRobot / cron-job.org）
-    # 每 10 分鐘 ping 一次網站網址，讓 Render 不會把它睡眠，
-    # 或是直接升級到 Render 的付費方案（Always On）。
+    # ⚠️ 重要限制（無法用程式碼解決，這是 Render 平台層級的行為）：
+    # Render 免費方案的 Web Service，只要 15 分鐘沒有「外部 HTTP 連線」進來，
+    # 就會把整個 process 直接關掉睡眠——background thread、排程、快取全部一起消失，
+    # 程式碼寫得再完善也擋不住，因為 process 本身被關掉了。
+    # 已經在 scan_scheduler.py 加上「自動重啟背景執行緒」的機制，
+    # 但那只能處理「process 還活著、但執行緒不知為何停了」的狀況，
+    # 沒辦法處理「Render 直接把整個 process 關掉」這件事。
+    #
+    # 要做到「網站跟掃描永遠不停」，二選一：
+    #   1) 免費作法：申請 UptimeRobot（uptimerobot.com）或 cron-job.org 帳號，
+    #      設定每 5-10 分鐘對你的網址發送一次 HTTP 請求（Monitor Type 選 HTTP(s)）。
+    #      這樣 Render 一直有連線進來，永遠不會判定為閒置，也就不會睡眠。
+    #   2) 付費作法：把 plan 從 free 升級成付費方案，並開啟 Always On。

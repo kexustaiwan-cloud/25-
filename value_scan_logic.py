@@ -210,21 +210,11 @@ def _admin_login_ui():
                 st.error("密碼錯誤")
 
 
-@st.cache_resource
-def _ensure_scheduler_started():
-    """
-    啟動背景排程掃描執行緒。
-    用 st.cache_resource 包起來，是為了確保「同一個運行中的 process」
-    不管有幾個瀏覽器分頁 / 幾個訪客連進來，背景執行緒都只會啟動一次，
-    不會每個 session 各開一條，浪費資源、互搶運算。
-    """
-    scan_scheduler.start_background_scheduler(DEFAULT_SCAN_PARAMS, _run_scan_core)
-    return True
-
-
 def run():
-    # 啟動背景排程掃描（整個 process 只會真正啟動一次）
-    _ensure_scheduler_started()
+    # 每次有人載入網頁都會檢查一次背景排程執行緒是否還活著；
+    # 若已啟動且正常運作，這裡的成本極低（只是檢查一個 boolean），可以放心每次都呼叫。
+    # 若因為未預期狀況死掉了，會在這裡立刻自動重新啟動，不需要等重新部署。
+    scan_scheduler.ensure_scheduler_alive(DEFAULT_SCAN_PARAMS, _run_scan_core)
 
     cache_status = scan_cache.load_scan_status()
 
