@@ -1,77 +1,75 @@
 import streamlit as st
+import yfinance as yf
+import pandas as pd
 
-# 常用的黃金切割率參考比例（0.618 為主要計算依據）
-FIB_RATIOS = [0.191, 0.382, 0.5, 0.618, 0.809]
+PERIODS = {"20日": 20, "60日": 60, "180日": 180}
+
+
+def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """新版 yfinance 有時會回傳 MultiIndex 欄位，這裡統一攤平"""
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
+def fetch_tw_stock(stock_id: str):
+    """依序嘗試上市(.TW)與上櫃(.TWO)代號，回傳(資料, 完整代號)"""
+    for suffix in [".TW", ".TWO"]:
+        ticker = f"{stock_id}{suffix}"
+        df = yf.download(ticker, period="1y", progress=False, auto_adjust=False)
+        if df is not None and not df.empty:
+            return _flatten_columns(df), ticker
+    return None, None
+
+
+def calc_levels(high: float, low: float):
+    diff = high - low
+    rebound_price = low + diff * 0.618   # 反彈預估價位
+    retrace_price = high - diff * 0.618  # 回檔預估價位
+    return rebound_price, retrace_price
 
 
 def run():
+    st.caption("輸入台灣股票代號，自動抓取近期高低點，計算反彈與回檔預估價位。")
 
-    st.caption("依據上一波高低點，計算高檔拉回的支撐價位，或低檔反彈的壓力價位。")
+    stock_id = st.text_input("台灣股票代號（例如：2330）", value="2330").strip()
 
-    tab1, tab2 = st.tabs(["📉 回檔計算（高檔拉回）", "📈 反彈計算（低檔反彈）"])
+    if not stock_id:
+        st.warning("⚠️ 請輸入股票代號。")
+        return
 
-    # ---------------- 回檔計算 ----------------
-    with tab1:
-      
+    with st.spinner("資料抓取中..."):
+        df, ticker = fetch_tw_stock(stock_id)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            high_price = st.number_input(
-                "上一個高點價位", min_value=0.0, value=100.0, step=0.05,
-                format="%.2f", key="retrace_high"
-            )
-        with col2:
-            low_price = st.number_input(
-                "目前低點價位", min_value=0.0, value=80.0, step=0.05,
-                format="%.2f", key="retrace_low"
-            )
+    if df is None:
+        st.error("❌ 查無此股票代號資料，請確認代號是否正確（上市或上櫃）。")
+        return
 
-        if high_price <= low_price:
-            st.warning("⚠️ 高點價位必須大於低點價位，請重新輸入。")
-        else:
-            diff = high_price - low_price
-            main_price = high_price - diff * 0.618
+    st.success(f"✅ 已取得 {ticker} 股價資料")
 
-            st.success(f"🎯 主要回檔價位（0.618）：**{main_price:.2f}**")
+    rows = []
+    for label, days in PERIODS.items():
+        sub = df.tail(days)
+        if sub.empty:
+            continue
 
-            data = [
-                {
-                    "回檔比例": f"{r:.3f}",
-                    "回檔價位": round(high_price - diff * r, 2),
-                }
-                for r in FIB_RATIOS
-            ]
-            st.table(data)
+        high = float(sub["High"].max())
+        low = float(sub["Low"].min())
+        rebound_price, retrace_price = calc_levels(high, low)
 
-    # ---------------- 反彈計算 ----------------
-    with tab2:
+        rows.append({
+            "期間": label,
+            "期間高點": round(high, 2),
+            "期間低點": round(low, 2),
+            "反彈預估價位": round(rebound_price, 2),
+            "回檔預估價位": round(retrace_price, 2),
+        })
+
+    if rows:
+        st.table(pd.DataFrame(rows))
+    else:
+        st.warning("⚠️ 資料不足，無法計算。")
 
 
-        col3, col4 = st.columns(2)
-        with col3:
-            low_price2 = st.number_input(
-                "上一個低點價位", min_value=0.0, value=80.0, step=0.05,
-                format="%.2f", key="rebound_low"
-            )
-        with col4:
-            high_price2 = st.number_input(
-                "目前高點價位", min_value=0.0, value=100.0, step=0.05,
-                format="%.2f", key="rebound_high"
-            )
-
-        if high_price2 <= low_price2:
-            st.warning("⚠️ 高點價位必須大於低點價位，請重新輸入。")
-        else:
-            diff2 = high_price2 - low_price2
-            main_price2 = low_price2 + diff2 * 0.618
-
-            st.success(f"🎯 主要反彈價位（0.618）：**{main_price2:.2f}**")
-
-            data2 = [
-                {
-                    "反彈比例": f"{r:.3f}",
-                    "反彈價位": round(low_price2 + diff2 * r, 2),
-                }
-                for r in FIB_RATIOS
-            ]
-            st.table(data2)
+if __name__ == "__main__":
+    run()
